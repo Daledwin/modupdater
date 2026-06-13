@@ -3,7 +3,7 @@
 	"id": "modupdater",
 	"version": "${version}",
 	"name": "Mod Updater",
-	"description": "Un mod Fabric.",
+	"description": "Synchronise les mods du client avec ceux requis par le serveur : a la connexion, le serveur envoie un manifeste (mods + URL source) ; le client compare, telecharge les manquants et propose un redemarrage.",
 	"authors": [],
 	"contact": {},
 	"license": "CC0-1.0",
