@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerConfigurationConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerConfigurationNetworking;
 import net.fabricmc.loader.api.FabricLoader;
@@ -25,12 +26,19 @@ public final class ServerManifest {
 	private static final Path CONFIG_PATH =
 			FabricLoader.getInstance().getConfigDir().resolve("modupdater.json");
 
+	/** Manifeste charge une fois au demarrage du serveur (null = rien a synchroniser). */
+	private static volatile ManifestPayload cached;
+
 	private ServerManifest() {
 	}
 
 	public static void register() {
+		// Lit la config (et cree le gabarit si absent) AU DEMARRAGE du serveur, pas a la 1re connexion :
+		// ainsi config/modupdater.json existe des le 1er boot, sans qu'un client ait besoin de se connecter.
+		ServerLifecycleEvents.SERVER_STARTING.register(server -> cached = load());
+
 		ServerConfigurationConnectionEvents.CONFIGURE.register((handler, server) -> {
-			ManifestPayload payload = load();
+			ManifestPayload payload = cached;
 			if (payload == null || payload.mods().isEmpty()) {
 				return; // rien a synchroniser
 			}
