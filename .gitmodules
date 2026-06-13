@@ -1,0 +1,3 @@
+[submodule "tools/fabric-agent-kit"]
+	path = tools/fabric-agent-kit
+	url = git@github.com:Daledwin/fabric-agent-kit.git

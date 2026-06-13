@@ -1,0 +1,32 @@
+{
+	"schemaVersion": 1,
+	"id": "modupdater",
+	"version": "${version}",
+	"name": "Mod Updater",
+	"description": "Un mod Fabric.",
+	"authors": [],
+	"contact": {},
+	"license": "CC0-1.0",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"hugo.brua.modupdater.Modupdater"
+		],
+		"client": [
+			"hugo.brua.modupdater.client.ModupdaterClient"
+		]
+	},
+	"mixins": [
+		"modupdater.mixins.json",
+		{
+			"config": "modupdater.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
