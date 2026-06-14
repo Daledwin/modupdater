@@ -59,9 +59,8 @@ public class ModSyncScreen extends Screen {
 			String line = (p.kind() == Kind.MISSING ? "manquant   " : "obsolete   ")
 					+ p.entry().id() + "  →  " + p.entry().version()
 					+ (p.kind() == Kind.OUTDATED ? "  (installe : " + p.installedVersion() + ")" : "")
-					// Avertir quand le manifeste ne fournit pas d'empreinte : le jar sera installe sans
-					// verification d'integrite (telechargement de code non verifie).
-					+ (p.entry().sha256().isBlank() ? "   [!] integrite non verifiee" : "");
+					// Mode strict : un mod sans empreinte sera refuse au telechargement.
+					+ (p.entry().sha256().isBlank() ? "   [!] sha256 manquant (refuse)" : "");
 			int color = p.kind() == Kind.MISSING ? 0xFFFF6B6B : 0xFFFFD166;
 			g.drawString(this.font, line, x, y, color);
 			y += this.font.lineHeight + 3;

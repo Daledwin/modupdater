@@ -27,8 +27,9 @@ import net.fabricmc.loader.api.metadata.ModOrigin;
  * de fond (ne bloque pas le rendu). Les mods ne prennent effet qu'au prochain demarrage (Fabric
  * ne peut pas charger un mod a chaud) -> l'ecran propose ensuite de quitter le jeu.
  *
- * <p>Securite : refuse les sources non-{@code https} (sauf localhost), et verifie le SHA-256 de
- * chaque jar (quand le manifeste en fournit un) avant de l'installer dans {@code mods/}.
+ * <p>Securite (mode strict) : refuse les sources non-{@code https} (sauf localhost), EXIGE une
+ * empreinte SHA-256 pour chaque mod du manifeste, et verifie cette empreinte avant d'installer le
+ * jar dans {@code mods/}. Un mod sans empreinte fait echouer le lot (jamais de code non verifie).
  */
 public final class ModDownloader {
 	public enum State {
@@ -73,6 +74,7 @@ public final class ModDownloader {
 		try {
 			URI base = URI.create(sourceUrl.endsWith("/") ? sourceUrl : sourceUrl + "/");
 			requireSafeSource(base);
+			requireAllHashed(problems);
 
 			HttpClient client = HttpClient.newBuilder()
 					.connectTimeout(Duration.ofSeconds(15))
@@ -149,11 +151,22 @@ public final class ModDownloader {
 				"source non-https refusee (http autorise seulement pour localhost) : " + base);
 	}
 
-	/** Verifie le SHA-256 du fichier telecharge. Empreinte vide = pas de verif (warn). Mismatch = abort. */
+	/** Mode strict : exige une empreinte pour chaque mod AVANT tout telechargement (refus du lot sinon). */
+	private static void requireAllHashed(List<Problem> problems) {
+		for (Problem p : problems) {
+			String sha = p.entry().sha256();
+			if (sha == null || sha.isBlank()) {
+				throw new IllegalArgumentException("sha256 manquant pour " + p.entry().file()
+						+ " — ajoute l'empreinte au manifeste (mode strict)");
+			}
+		}
+	}
+
+	/** Verifie le SHA-256 du fichier telecharge avant installation. Vide ou mismatch = abort. */
 	private static void verifyIntegrity(Path part, String expectedHex, String file) throws IOException {
 		if (expectedHex == null || expectedHex.isBlank()) {
-			Modupdater.LOGGER.warn("[modupdater] {} : aucun sha256 dans le manifeste, integrite NON verifiee.", file);
-			return;
+			Files.deleteIfExists(part);
+			throw new IOException(file + " : sha256 manquant (mode strict)");
 		}
 		String actual = sha256Hex(part);
 		if (!actual.equalsIgnoreCase(expectedHex.trim())) {

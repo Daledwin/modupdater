@@ -12,8 +12,8 @@ import net.minecraft.network.codec.StreamCodec;
  *                metadonnees de build SemVer ({@code +mc1.21.11})
  * @param file    le nom du fichier .jar a telecharger depuis l'URL source (ex: "sodium-0.5.8.jar")
  * @param side    "client" (purement client) ou "both" ; informatif, defaut "both"
- * @param sha256  empreinte SHA-256 hex (minuscules) du .jar attendu ; vide = pas de verification
- *                d'integrite (deconseille). Verifiee cote client avant d'installer le jar.
+ * @param sha256  empreinte SHA-256 hex (minuscules) du .jar attendu ; OBLIGATOIRE (mode strict) :
+ *                un mod sans empreinte est refuse au telechargement. Verifiee cote client avant install.
  */
 public record ModEntry(String id, String version, String file, String side, String sha256) {
 	public static final StreamCodec<ByteBuf, ModEntry> STREAM_CODEC = StreamCodec.composite(
