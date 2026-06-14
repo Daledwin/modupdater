@@ -40,14 +40,38 @@ public final class ClientManifestState {
 				continue;
 			}
 			String installed = mc.get().getMetadata().getVersion().getFriendlyString();
-			if (!e.version().isBlank() && !installed.equals(e.version())) {
+			if (!e.version().isBlank() && !sameVersion(installed, e.version())) {
 				found.add(new Problem(e, Kind.OUTDATED, installed));
 			}
 		}
 		sourceUrl = payload.sourceUrl();
 		problems = List.copyOf(found);
+		// Nouveau manifeste = nouveau contexte : repartir d'un etat de telechargement propre
+		// (sinon un DONE/ERROR d'une connexion precedente grise le bouton ou affiche un message perime).
+		ModDownloader.reset();
 		Modupdater.LOGGER.info("[modupdater] manifeste recu : {} mods, {} a corriger.",
 				payload.mods().size(), found.size());
+	}
+
+	/**
+	 * Compare deux versions en ignorant les metadonnees de build SemVer (tout ce qui suit {@code +}).
+	 * {@code getFriendlyString()} renvoie typiquement {@code 0.5.8+mc1.21.11} alors que le manifeste
+	 * porte {@code 0.5.8} -> sans ce strip, tout mod serait faussement signale OUTDATED en permanence.
+	 */
+	private static boolean sameVersion(String installed, String required) {
+		return core(installed).equals(core(required));
+	}
+
+	private static String core(String v) {
+		int i = v.indexOf('+');
+		return i < 0 ? v : v.substring(0, i);
+	}
+
+	/** Vide l'etat (a chaque nouvelle connexion) pour ne pas trainer le manifeste d'un serveur precedent. */
+	public static void clear() {
+		sourceUrl = "";
+		problems = List.of();
+		ModDownloader.reset();
 	}
 
 	public static boolean hasWork() {

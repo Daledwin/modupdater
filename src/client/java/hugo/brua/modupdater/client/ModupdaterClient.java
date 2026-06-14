@@ -5,6 +5,7 @@ import hugo.brua.modupdater.network.ModEntry;
 import java.util.List;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.networking.v1.ClientConfigurationNetworking;
+import net.fabricmc.fabric.api.client.networking.v1.ClientLoginConnectionEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.Screens;
 import net.fabricmc.loader.api.FabricLoader;
@@ -16,6 +17,12 @@ import net.minecraft.network.chat.Component;
 public class ModupdaterClient implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
+		// 0) A chaque nouvelle connexion, repartir d'un etat propre. On clear en phase LOGIN (avant la
+		//    config) : ainsi meme un serveur vanilla qui kicke tot en configuration a deja efface l'etat
+		//    du serveur precedent, sans jamais effacer le manifeste de la connexion courante (recu plus
+		//    tard, en phase configuration).
+		ClientLoginConnectionEvents.INIT.register((handler, client) -> ClientManifestState.clear());
+
 		// 1) Reception du manifeste en phase configuration (avant toute deconnexion).
 		ClientConfigurationNetworking.registerGlobalReceiver(ManifestPayload.TYPE,
 				(payload, context) -> ClientManifestState.onReceive(payload));
@@ -42,8 +49,8 @@ public class ModupdaterClient implements ClientModInitializer {
 										ClientManifestState.onReceive(new ManifestPayload(
 												"https://exemple.invalid/mods",
 												List.of(
-														new ModEntry("sodium", "0.5.8", "sodium-0.5.8.jar", "client"),
-														new ModEntry("lithium", "0.13.0", "lithium-0.13.0.jar", "both"))));
+														new ModEntry("sodium", "0.5.8", "sodium-0.5.8.jar", "client", ""),
+														new ModEntry("lithium", "0.13.0", "lithium-0.13.0.jar", "both", ""))));
 										client.setScreen(new ModSyncScreen(screen));
 									})
 							.bounds(scaledWidth / 2 - 110, 6, 220, 20).build();

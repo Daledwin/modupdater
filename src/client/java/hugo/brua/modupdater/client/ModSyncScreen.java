@@ -58,7 +58,10 @@ public class ModSyncScreen extends Screen {
 			Problem p = probs.get(i);
 			String line = (p.kind() == Kind.MISSING ? "manquant   " : "obsolete   ")
 					+ p.entry().id() + "  →  " + p.entry().version()
-					+ (p.kind() == Kind.OUTDATED ? "  (installe : " + p.installedVersion() + ")" : "");
+					+ (p.kind() == Kind.OUTDATED ? "  (installe : " + p.installedVersion() + ")" : "")
+					// Avertir quand le manifeste ne fournit pas d'empreinte : le jar sera installe sans
+					// verification d'integrite (telechargement de code non verifie).
+					+ (p.entry().sha256().isBlank() ? "   [!] integrite non verifiee" : "");
 			int color = p.kind() == Kind.MISSING ? 0xFFFF6B6B : 0xFFFFD166;
 			g.drawString(this.font, line, x, y, color);
 			y += this.font.lineHeight + 3;

@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerConfigurationConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerConfigurationNetworking;
@@ -67,7 +68,8 @@ public final class ServerManifest {
 					continue;
 				}
 				String side = (m.side == null || m.side.isBlank()) ? "both" : m.side;
-				mods.add(new ModEntry(m.id, m.version == null ? "" : m.version, m.file, side));
+				String sha256 = m.sha256 == null ? "" : m.sha256.trim().toLowerCase(Locale.ROOT);
+				mods.add(new ModEntry(m.id, m.version == null ? "" : m.version, m.file, side, sha256));
 			}
 			return new ManifestPayload(dto.sourceUrl, mods);
 		} catch (Exception e) {
@@ -86,6 +88,8 @@ public final class ServerManifest {
 			sample.version = "0.5.8";
 			sample.file = "sodium-0.5.8.jar";
 			sample.side = "client";
+			// sha256 hex du jar attendu (ex: sha256sum sodium-0.5.8.jar). Vide = pas de verif (deconseille).
+			sample.sha256 = "";
 			dto.mods.add(sample);
 			Files.createDirectories(CONFIG_PATH.getParent());
 			Files.writeString(CONFIG_PATH, GSON.toJson(dto));
@@ -106,5 +110,6 @@ public final class ServerManifest {
 		String version;
 		String file;
 		String side;
+		String sha256;
 	}
 }

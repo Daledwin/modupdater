@@ -20,7 +20,9 @@ public record ManifestPayload(String sourceUrl, List<ModEntry> mods) implements 
 
 	public static final StreamCodec<ByteBuf, ManifestPayload> STREAM_CODEC = StreamCodec.composite(
 			ByteBufCodecs.STRING_UTF8, ManifestPayload::sourceUrl,
-			ModEntry.STREAM_CODEC.apply(ByteBufCodecs.list()), ManifestPayload::mods,
+			// Liste BORNEE (1024) : un serveur hostile pourrait sinon annoncer une taille enorme
+			// (list() sans argument = Integer.MAX_VALUE) -> OOM cote client au decodage netty.
+			ModEntry.STREAM_CODEC.apply(ByteBufCodecs.list(1024)), ManifestPayload::mods,
 			ManifestPayload::new);
 
 	@Override
