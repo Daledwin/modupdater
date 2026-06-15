@@ -3,6 +3,7 @@ package hugo.brua.modupdater.client;
 import hugo.brua.modupdater.Modupdater;
 import hugo.brua.modupdater.network.ManifestPayload;
 import hugo.brua.modupdater.network.ModEntry;
+import hugo.brua.modupdater.sync.Versions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -35,12 +36,14 @@ public final class ClientManifestState {
 		List<Problem> found = new ArrayList<>();
 		for (ModEntry e : payload.mods()) {
 			Optional<ModContainer> mc = FabricLoader.getInstance().getModContainer(e.id());
-			if (mc.isEmpty()) {
+			// getModContainer resout les alias 'provides' -> exiger l'id PRIMAIRE, sinon le mod n'est
+			// present que comme alias d'un autre et doit etre considere manquant.
+			if (mc.isEmpty() || !mc.get().getMetadata().getId().equals(e.id())) {
 				found.add(new Problem(e, Kind.MISSING, ""));
 				continue;
 			}
 			String installed = mc.get().getMetadata().getVersion().getFriendlyString();
-			if (!e.version().isBlank() && !sameVersion(installed, e.version())) {
+			if (!e.version().isBlank() && !Versions.sameVersion(installed, e.version())) {
 				found.add(new Problem(e, Kind.OUTDATED, installed));
 			}
 		}
@@ -51,20 +54,6 @@ public final class ClientManifestState {
 		ModDownloader.reset();
 		Modupdater.LOGGER.info("[modupdater] manifeste recu : {} mods, {} a corriger.",
 				payload.mods().size(), found.size());
-	}
-
-	/**
-	 * Compare deux versions en ignorant les metadonnees de build SemVer (tout ce qui suit {@code +}).
-	 * {@code getFriendlyString()} renvoie typiquement {@code 0.5.8+mc1.21.11} alors que le manifeste
-	 * porte {@code 0.5.8} -> sans ce strip, tout mod serait faussement signale OUTDATED en permanence.
-	 */
-	private static boolean sameVersion(String installed, String required) {
-		return core(installed).equals(core(required));
-	}
-
-	private static String core(String v) {
-		int i = v.indexOf('+');
-		return i < 0 ? v : v.substring(0, i);
 	}
 
 	/** Vide l'etat (a chaque nouvelle connexion) pour ne pas trainer le manifeste d'un serveur precedent. */
