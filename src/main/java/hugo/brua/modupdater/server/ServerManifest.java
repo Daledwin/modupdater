@@ -5,57 +5,55 @@ import com.google.gson.GsonBuilder;
 import hugo.brua.modupdater.Modupdater;
 import hugo.brua.modupdater.network.ManifestPayload;
 import hugo.brua.modupdater.network.ModEntry;
+import hugo.brua.modupdater.sync.JarInstaller;
+import hugo.brua.modupdater.sync.Versions;
 import java.io.IOException;
-import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerConfigurationConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerConfigurationNetworking;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.ModContainer;
-import net.fabricmc.loader.api.metadata.ModEnvironment;
-import net.fabricmc.loader.api.metadata.ModMetadata;
-import net.fabricmc.loader.api.metadata.ModOrigin;
 
 /**
- * Cote serveur (dedie uniquement) : construit le manifeste au demarrage et le pousse au client en
- * phase <em>configuration</em> (avant toute deconnexion). Source du manifeste, selon
- * {@code config/modupdater.json} :
- * <ul>
- *   <li>{@code autoFromServerMods=true} : derive automatiquement les entrees a partir des jars
- *       reellement charges dans {@code mods/} (id, version, nom de fichier, sha256 calcule), en
- *       excluant les mods {@code environment=SERVER}, l'eventuelle liste {@code exclude}, et
- *       modupdater lui-meme. L'admin n'a qu'a uploader les memes jars sur {@code sourceUrl}.</li>
- *   <li>{@code mods[]} : entrees explicites, fusionnees par-dessus l'auto (override par id) — pour
- *       les mods <em>client-only</em> que le serveur ne fait pas tourner.</li>
- * </ul>
+ * Cote serveur dedie. {@code config/modupdater.json} contient une {@code repoUrl} : un depot HTTP
+ * hebergeant un {@code index.json} (liste complete des mods : id, version, file, side, sha256) et
+ * les jars. Au demarrage, modupdater :
+ * <ol>
+ *   <li>recupere l'index ;</li>
+ *   <li><b>self-provisioning</b> : telecharge dans son {@code mods/} les entrees {@code server}/{@code both}
+ *       manquantes ou obsoletes (verif sha256) -> <b>redemarrage requis</b> pour les charger ;</li>
+ *   <li>construit le manifeste client ({@code client}/{@code both}) et le pousse aux clients en phase
+ *       configuration. Les clients telechargent du meme depot.</li>
+ * </ol>
  */
 public final class ServerManifest {
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static final Path CONFIG_PATH =
 			FabricLoader.getInstance().getConfigDir().resolve("modupdater.json");
 
-	/** Manifeste charge une fois au demarrage du serveur (null = rien a synchroniser). */
+	/** Manifeste client construit une fois au demarrage (null = rien a pousser). */
 	private static volatile ManifestPayload cached;
 
 	private ServerManifest() {
 	}
 
 	public static void register() {
-		ServerLifecycleEvents.SERVER_STARTING.register(server -> cached = load());
+		ServerLifecycleEvents.SERVER_STARTING.register(server -> cached = bootstrap());
 
 		ServerConfigurationConnectionEvents.CONFIGURE.register((handler, server) -> {
 			ManifestPayload payload = cached;
 			if (payload == null || payload.mods().isEmpty()) {
-				return; // rien a synchroniser
+				return;
 			}
 			if (ServerConfigurationNetworking.canSend(handler, ManifestPayload.TYPE)) {
 				ServerConfigurationNetworking.send(handler, payload);
@@ -65,175 +63,161 @@ public final class ServerManifest {
 		});
 	}
 
-	/** Construit le manifeste (auto + explicite). Cree un gabarit si absent. Null si rien d'exploitable. */
-	private static ManifestPayload load() {
+	/** Lit la config, recupere l'index, self-provisionne, et renvoie le manifeste client (ou null). */
+	private static ManifestPayload bootstrap() {
 		try {
 			if (!Files.exists(CONFIG_PATH)) {
 				writeTemplate();
 				return null;
 			}
-			Dto dto = GSON.fromJson(Files.readString(CONFIG_PATH), Dto.class);
-			if (dto == null || dto.sourceUrl == null || dto.sourceUrl.isBlank()) {
+			Cfg cfg = GSON.fromJson(Files.readString(CONFIG_PATH), Cfg.class);
+			if (cfg == null || cfg.repoUrl == null || cfg.repoUrl.isBlank()) {
+				Modupdater.LOGGER.warn("[modupdater] repoUrl absent de {} : rien a synchroniser.", CONFIG_PATH);
 				return null;
 			}
+			URI base = URI.create(cfg.repoUrl.endsWith("/") ? cfg.repoUrl : cfg.repoUrl + "/");
+			JarInstaller.requireSafeSource(base);
+			HttpClient client = JarInstaller.newClient();
 
-			Set<String> exclude = new HashSet<>();
-			if (dto.exclude != null) {
-				for (String e : dto.exclude) {
-					if (e != null && !e.isBlank()) {
-						exclude.add(e.trim());
-					}
-				}
+			List<ModEntry> index = dedupById(fetchIndex(client, base, cfg.indexFile));
+			Modupdater.LOGGER.info("[modupdater] index recupere : {} mods.", index.size());
+
+			// Self-provision EN TACHE DE FOND : les downloads peuvent etre longs et de toute facon les
+			// mods ne se chargent qu'au redemarrage -> ne pas bloquer le boot du serveur (le socket n'est
+			// pas encore ouvert a ce stade). Le manifeste client, lui, est construit tout de suite.
+			List<ModEntry> serverMods = index.stream().filter(e -> isServerSide(e.side())).toList();
+			if (!serverMods.isEmpty()) {
+				Thread t = new Thread(() -> provisionServer(client, base, serverMods), "modupdater-provision");
+				t.setDaemon(true);
+				t.start();
 			}
 
-			// id -> entree ; ordre auto puis explicite, l'explicite override l'auto pour un meme id.
-			LinkedHashMap<String, ModEntry> byId = new LinkedHashMap<>();
-			if (dto.autoFromServerMods) {
-				for (ModEntry e : autoEntries(exclude)) {
-					byId.put(e.id(), e);
-				}
-				Modupdater.LOGGER.info("[modupdater] auto : {} mod(s) derive(s) du dossier mods/ du serveur.",
-						byId.size());
-			}
-			if (dto.mods != null) {
-				for (ModDto m : dto.mods) {
-					ModEntry e = fromDto(m);
-					if (e != null) {
-						byId.put(e.id(), e);
-					}
-				}
-			}
-
-			if (byId.isEmpty()) {
+			List<ModEntry> clientMods = index.stream().filter(e -> isClientSide(e.side())).toList();
+			if (clientMods.isEmpty()) {
 				return null;
 			}
-			return new ManifestPayload(dto.sourceUrl, List.copyOf(byId.values()));
+			return new ManifestPayload(cfg.repoUrl, List.copyOf(clientMods));
 		} catch (Exception e) {
-			// Tout echec ici annule TOUT le manifeste (aucune synchro) -> niveau error pour la visibilite.
-			Modupdater.LOGGER.error("[modupdater] manifeste non construit ({}) : {}", CONFIG_PATH, e.toString());
+			// N'empeche PAS le serveur de booter ; on logge et on ne pousse rien.
+			Modupdater.LOGGER.error("[modupdater] depot non exploitable ({}) : {}", CONFIG_PATH,
+					JarInstaller.friendlyReason(e));
 			return null;
 		}
 	}
 
-	/**
-	 * Derive les entrees a partir des jars autonomes du dossier {@code mods/} du serveur. Exclut les
-	 * mods {@code environment=SERVER}, la liste {@code exclude}, modupdater lui-meme, et tout ce qui
-	 * n'est pas un jar directement dans {@code mods/} (built-ins, sous-modules JiJ).
-	 */
-	private static List<ModEntry> autoEntries(Set<String> exclude) {
-		List<ModEntry> out = new ArrayList<>();
-		Path modsReal = realOrNull(FabricLoader.getInstance().getGameDir().resolve("mods"));
-		if (modsReal == null) {
-			return out;
-		}
-		for (ModContainer mc : FabricLoader.getInstance().getAllMods()) {
-			ModMetadata md = mc.getMetadata();
-			String id = md.getId();
-			boolean excluded = exclude.contains(id) || md.getProvides().stream().anyMatch(exclude::contains);
-			if (id.equals(Modupdater.MOD_ID) || excluded) {
-				continue; // le client a deja modupdater ; respect de la liste d'exclusion (id ou alias provides)
-			}
-			if (md.getEnvironment() == ModEnvironment.SERVER) {
-				continue; // inutile au client
-			}
-			if (mc.getOrigin().getKind() != ModOrigin.Kind.PATH) {
-				continue; // built-in / JiJ : pas un jar autonome de mods/
-			}
-			Path jar = jarInMods(mc, modsReal);
-			if (jar == null) {
-				continue; // charge hors de mods/ (classpath dev, autre dossier)
-			}
-			String sha = sha256Hex(jar);
-			if (sha == null) {
-				// Jar illisible au demarrage : on ne peut pas l'annoncer sans empreinte -> il ne sera PAS
-				// synchronise ce boot-ci (visible dans les logs ; relancer le serveur si transitoire).
-				Modupdater.LOGGER.error("[modupdater] {} NON synchronise (sha256 illisible).", id);
+	/** Telecharge dans mods/ les mods server/both absents ou en mauvaise version (redemarrage requis). */
+	private static void provisionServer(HttpClient client, URI base, List<ModEntry> serverMods) {
+		Path modsDir = FabricLoader.getInstance().getGameDir().resolve("mods");
+		List<String> warnings = new ArrayList<>();
+		int installed = 0;
+		for (ModEntry e : serverMods) {
+			if (presentAndCurrent(e)) {
 				continue;
 			}
-			String side = md.getEnvironment() == ModEnvironment.CLIENT ? "client" : "both";
-			out.add(new ModEntry(id, md.getVersion().getFriendlyString(), jar.getFileName().toString(), side, sha));
+			try {
+				JarInstaller.installOne(client, base, e, modsDir, warnings);
+				installed++;
+			} catch (Exception ex) {
+				Modupdater.LOGGER.error("[modupdater] echec install serveur {} : {}", e.file(),
+						JarInstaller.friendlyReason(ex));
+			}
+		}
+		if (installed > 0) {
+			Modupdater.LOGGER.warn("[modupdater] {} mod(s) serveur installes -> REDEMARRAGE REQUIS pour les charger.",
+					installed);
+		}
+		if (!warnings.isEmpty()) {
+			Modupdater.LOGGER.warn("[modupdater] anciens jars a supprimer a la main : {}",
+					String.join(", ", warnings));
+		}
+	}
+
+	/** true si le mod est deja charge avec une version compatible (rien a telecharger). */
+	private static boolean presentAndCurrent(ModEntry e) {
+		ModContainer mc = FabricLoader.getInstance().getModContainer(e.id()).orElse(null);
+		// getModContainer resout les alias 'provides' -> exiger que l'id PRIMAIRE corresponde, sinon
+		// l'id n'est present que comme alias d'un autre mod et il faut bien provisionner notre jar.
+		if (mc == null || !mc.getMetadata().getId().equals(e.id())) {
+			return false;
+		}
+		String installed = mc.getMetadata().getVersion().getFriendlyString();
+		return e.version().isBlank() || Versions.sameVersion(installed, e.version());
+	}
+
+	private static List<ModEntry> fetchIndex(HttpClient client, URI base, String indexFile)
+			throws IOException, InterruptedException {
+		String name = (indexFile == null || indexFile.isBlank()) ? "index.json" : indexFile.trim();
+		URI idx = base.resolve(name);
+		// Timeout borne : ce GET est synchrone au boot, il ne doit pas faire trainer le demarrage.
+		HttpRequest req = HttpRequest.newBuilder(idx).GET().timeout(Duration.ofSeconds(20)).build();
+		HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+		if (resp.statusCode() != 200) {
+			throw new IOException("HTTP " + resp.statusCode() + " sur " + idx);
+		}
+		IndexDto dto = GSON.fromJson(resp.body(), IndexDto.class);
+		List<ModEntry> out = new ArrayList<>();
+		if (dto != null && dto.mods != null) {
+			for (EntryDto m : dto.mods) {
+				if (m == null || m.id == null || m.file == null) {
+					continue;
+				}
+				String side = (m.side == null || m.side.isBlank()) ? "both" : m.side.trim().toLowerCase(Locale.ROOT);
+				if (!isServerSide(side) && !isClientSide(side)) {
+					Modupdater.LOGGER.warn("[modupdater] side '{}' inconnu pour {} -> entree ignoree.", side, m.id);
+					continue; // typo (ex: 'sever') : ne PAS distribuer par defaut (plus sur)
+				}
+				String sha = m.sha256 == null ? "" : m.sha256.trim().toLowerCase(Locale.ROOT);
+				out.add(new ModEntry(m.id, m.version == null ? "" : m.version, m.file, side, sha));
+			}
 		}
 		return out;
 	}
 
-	/** Le premier chemin d'origine du mod qui est un .jar directement dans {@code mods/}, sinon null. */
-	private static Path jarInMods(ModContainer mc, Path modsReal) {
-		for (Path p : mc.getOrigin().getPaths()) {
-			Path real = realOrNull(p);
-			if (real == null || real.getFileName() == null || real.getParent() == null) {
-				continue;
-			}
-			if (real.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".jar")
-					&& real.getParent().equals(modsReal)) {
-				return real;
+	/** Deduplique par id (garde la 1re occurrence, avertit sur les doublons de l'index). */
+	private static List<ModEntry> dedupById(List<ModEntry> entries) {
+		java.util.LinkedHashMap<String, ModEntry> byId = new java.util.LinkedHashMap<>();
+		for (ModEntry e : entries) {
+			if (byId.putIfAbsent(e.id(), e) != null) {
+				Modupdater.LOGGER.warn("[modupdater] id '{}' en double dans l'index -> doublon ignore.", e.id());
 			}
 		}
-		return null;
+		return List.copyOf(byId.values());
 	}
 
-	private static ModEntry fromDto(ModDto m) {
-		if (m == null || m.id == null || m.file == null) {
-			return null;
-		}
-		String side = (m.side == null || m.side.isBlank()) ? "both" : m.side;
-		String sha256 = m.sha256 == null ? "" : m.sha256.trim().toLowerCase(Locale.ROOT);
-		return new ModEntry(m.id, m.version == null ? "" : m.version, m.file, side, sha256);
+	private static boolean isServerSide(String side) {
+		return side.equals("server") || side.equals("both");
 	}
 
-	private static Path realOrNull(Path p) {
-		try {
-			return p.toRealPath();
-		} catch (IOException e) {
-			return null;
-		}
-	}
-
-	private static String sha256Hex(Path f) {
-		try {
-			MessageDigest md = MessageDigest.getInstance("SHA-256");
-			byte[] buf = new byte[8192];
-			try (InputStream in = Files.newInputStream(f)) {
-				int n;
-				while ((n = in.read(buf)) != -1) {
-					md.update(buf, 0, n);
-				}
-			}
-			StringBuilder sb = new StringBuilder(64);
-			for (byte b : md.digest()) {
-				sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-			}
-			return sb.toString();
-		} catch (Exception e) {
-			Modupdater.LOGGER.warn("[modupdater] sha256 impossible pour {} : {}", f, e.toString());
-			return null;
-		}
+	private static boolean isClientSide(String side) {
+		return side.equals("client") || side.equals("both");
 	}
 
 	private static void writeTemplate() {
 		try {
-			Dto dto = new Dto();
-			dto.sourceUrl = "https://exemple.invalid/mods";
-			dto.autoFromServerMods = true;
-			dto.exclude = new ArrayList<>(List.of("fabric-api"));
-			dto.mods = new ArrayList<>();
+			Cfg cfg = new Cfg();
+			cfg.repoUrl = "https://exemple.invalid/repo";
+			cfg.indexFile = "index.json";
 			Files.createDirectories(CONFIG_PATH.getParent());
-			Files.writeString(CONFIG_PATH, GSON.toJson(dto));
-			Modupdater.LOGGER.info("[modupdater] gabarit de config cree : {} (edite sourceUrl puis relance).",
+			Files.writeString(CONFIG_PATH, GSON.toJson(cfg));
+			Modupdater.LOGGER.info("[modupdater] gabarit de config cree : {} (mets ta repoUrl puis relance).",
 					CONFIG_PATH);
 		} catch (IOException e) {
 			Modupdater.LOGGER.warn("[modupdater] impossible d'ecrire le gabarit de config : {}", e.toString());
 		}
 	}
 
-	/** DTO Gson (champs mutables, peuples par reflexion — pas de dependance au support des records). */
-	private static final class Dto {
-		String sourceUrl;
-		boolean autoFromServerMods;
-		List<String> exclude;
-		List<ModDto> mods;
+	/** Config serveur. */
+	private static final class Cfg {
+		String repoUrl;
+		String indexFile;
 	}
 
-	private static final class ModDto {
+	/** index.json : { "mods": [ { id, version, file, side, sha256 }, ... ] }. */
+	private static final class IndexDto {
+		List<EntryDto> mods;
+	}
+
+	private static final class EntryDto {
 		String id;
 		String version;
 		String file;
