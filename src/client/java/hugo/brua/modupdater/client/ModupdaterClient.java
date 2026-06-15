@@ -6,11 +6,14 @@ import java.util.List;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.networking.v1.ClientConfigurationNetworking;
 import net.fabricmc.fabric.api.client.networking.v1.ClientLoginConnectionEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.Screens;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.DisconnectedScreen;
+import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.network.chat.Component;
 
@@ -27,15 +30,38 @@ public class ModupdaterClient implements ClientModInitializer {
 		ClientConfigurationNetworking.registerGlobalReceiver(ManifestPayload.TYPE,
 				(payload, context) -> ClientManifestState.onReceive(payload));
 
-		// 2) Sur l'ecran de deconnexion (refus du serveur), si des mods manquent : bouton d'install.
+		// 2) Bouton d'install quand des mods manquent, sur deux ecrans :
+		//    - DisconnectedScreen : le serveur a refuse la connexion (mod bloquant) ;
+		//    - PauseScreen (Echap) : on a REJOINT le serveur mais des mods manquent quand meme (mod non
+		//      bloquant pour la connexion) -> sinon le joueur n'aurait aucun point d'entree.
 		ScreenEvents.AFTER_INIT.register((client, screen, scaledWidth, scaledHeight) -> {
-			if (screen instanceof DisconnectedScreen && ClientManifestState.hasWork()) {
-				Button install = Button.builder(
+			if (!ClientManifestState.hasWork()) {
+				return;
+			}
+			if (screen instanceof DisconnectedScreen) {
+				Screens.getButtons(screen).add(Button.builder(
 								Component.literal("Mod Updater : installer les mods manquants"),
 								btn -> client.setScreen(new ModSyncScreen(screen)))
-						.bounds(scaledWidth / 2 - 110, 6, 220, 20).build();
-				Screens.getButtons(screen).add(install);
+						.bounds(scaledWidth / 2 - 110, 6, 220, 20).build());
+			} else if (screen instanceof PauseScreen) {
+				int n = ClientManifestState.problems().size();
+				Screens.getButtons(screen).add(Button.builder(
+								Component.literal("Mod Updater : " + n + " mod(s) manquant(s)"),
+								btn -> client.setScreen(new ModSyncScreen(screen)))
+						.bounds(scaledWidth / 2 - 100, scaledHeight - 30, 200, 20).build());
 			}
+		});
+
+		// 2b) A la connexion REUSSIE, si des mods manquent : message chat (le joueur a rejoint sans kick,
+		//     il faut l'avertir sinon il ne verrait rien).
+		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+			if (!ClientManifestState.hasWork()) {
+				return;
+			}
+			int n = ClientManifestState.problems().size();
+			client.execute(() -> client.gui.getChat().addMessage(
+					Component.literal("[Mod Updater] " + n + " mod(s) manquant(s) — Echap puis « Mod Updater » pour installer.")
+							.withStyle(ChatFormatting.GOLD)));
 		});
 
 		// 3) DEV uniquement : bouton sur l'ecran titre qui injecte un faux manifeste et ouvre la GUI,
